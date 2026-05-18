@@ -4,7 +4,10 @@ import hashlib
 import xml.etree.ElementTree as ET
 import urllib.request
 import urllib.error
-from datetime import datetime
+from datetime import datetime, timezone
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 FEED_URL      = "https://warcomfeed.link/rss.xml"
@@ -91,7 +94,7 @@ def post_to_discord(article: dict):
         "description": (article["description"] or "")[:300] + ("…" if len(article["description"]) > 300 else ""),
         "color":       0xAB0000,   # dark red — very 40K
         "footer":      {"text": "Warhammer Community • Warhammer 40,000"},
-        "timestamp":   datetime.utcnow().isoformat(),
+        "timestamp":   utcnow().isoformat(),
     }
     if article.get("image_url"):
         embed["image"] = {"url": article["image_url"]}
@@ -105,7 +108,10 @@ def post_to_discord(article: dict):
     req = urllib.request.Request(
         WEBHOOK_URL,
         data=payload,
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent":   "WarComServoSkull/1.0 (GitHub Actions)",
+        },
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=10) as resp:
@@ -113,7 +119,7 @@ def post_to_discord(article: dict):
             raise RuntimeError(f"Discord returned HTTP {resp.status}")
 
 def main():
-    print(f"[{datetime.utcnow().isoformat()}] Fetching feed…")
+    print(f"[{utcnow().isoformat()}] Fetching feed…")
     articles = fetch_feed()
     seen     = load_seen()
     new      = [a for a in articles if article_id(a["link"]) not in seen and is_40k(a)]
