@@ -235,21 +235,35 @@ def main():
         articles = fetch_feed()
         seen = load_seen()
         
-        # Filter: not in cooldown and is 40K
+        # Filter: not seen before AND is 40K
+        # This deduplicates by checking if article_id exists in seen at all
         new = [
             a for a in articles 
-            if not is_within_cooldown(article_id(a["link"]), seen, cooldown_hours) and is_40k(a, keywords)
+            if article_id(a["link"]) not in seen and is_40k(a, keywords)
         ]
         
         log_message(f"Found {len(new)} new 40K articles (out of {len(articles)} total)")
         
-        if not new:
+        # Deduplicate within this run (in case feed has duplicates)
+        seen_in_run = set()
+        deduplicated = []
+        for article in new:
+            aid = article_id(article["link"])
+            if aid not in seen_in_run:
+                deduplicated.append(article)
+                seen_in_run.add(aid)
+            else:
+                log_message(f"Skipping duplicate in feed: {article['title'][:50]}…")
+        
+        log_message(f"After deduplication: {len(deduplicated)} unique articles")
+        
+        if not deduplicated:
             log_message("No new 40K articles to post.")
             return
         
         # Post oldest-first, cap at max_post
         posted_count = 0
-        for article in reversed(new[:max_post]):
+        for article in reversed(deduplicated[:max_post]):
             try:
                 log_message(f"Posting: {article['title'][:80]}…")
                 post_to_discord(article)
