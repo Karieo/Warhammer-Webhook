@@ -7,6 +7,7 @@ import urllib.error
 from datetime import datetime, timezone
 import time
 import sys
+import re
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -18,12 +19,10 @@ def log_message(message: str, level: str = "INFO"):
     sys.stdout.flush()
 
 # ── Config ────────────────────────────────────────────────────────────
-FEED_URL           = "https://warcomfeed.link/rss.xml"
 WEBHOOK_URL        = os.environ.get("DISCORD_WEBHOOK_URL", "")
 SEEN_FILE          = "seen_articles.json"
 FAILED_FILE        = "failed_articles.json"
 CONFIG_FILE        = "config.json"
-MAX_POST           = 5
 MAX_RETRIES        = 3
 RETRY_DELAY        = 2  # seconds
 DISCORD_POST_DELAY = 0.5  # seconds between Discord posts to avoid rate limiting
@@ -31,38 +30,24 @@ MAX_POST_FAILURES  = 3  # Mark article as permanently failed after this many att
 
 # Default configuration
 DEFAULT_CONFIG = {
-    "max_post": MAX_POST,
-    "filter_keywords": [
-        "warhammer 40",
-        "40,000",
-        "40k",
-        "space marine",
-        "astartes",
-        "chaos space",
-        "necron",
-        "ork",
-        "eldar",
-        "aeldari",
-        "tyranid",
-        "tau",
-        "t'au",
-        "imperial guard",
-        "astra militarum",
-        "adeptus mechanicus",
-        "sisters of battle",
-        "adepta sororitas",
-        "dark angels",
-        "ultramarines",
-        "blood angels",
-        "space wolves",
-        "deathwatch",
-        "grey knights",
-        "inquisition",
-        "kill team",
-        "chaos knights",
-        "custodes",
-        "adeptus custodes",
-    ]
+    "feed_url": "https://warcomfeed.link/rss.xml",
+    "max_post": 5,
+    "check_interval_minutes": 60,
+    "embed": {
+        "author_name": "RSS Feed",
+        "author_url": None,
+        "avatar_url": None,
+        "color": "0x1f77b4",
+        "footer_text": "RSS Feed"
+    },
+    "filter": {
+        "enabled": True,
+        "mode": "any",
+        "keywords": [],
+        "exclude_keywords": [],
+        "include_only": [],
+        "exclude_patterns": []
+    }
 }
 
 def load_config() -> dict:
@@ -72,7 +57,8 @@ def load_config() -> dict:
             with open(CONFIG_FILE) as f:
                 config = json.load(f)
             log_message(f"Loaded configuration from {CONFIG_FILE}")
-            return config
+            # Merge with defaults to ensure all required keys exist
+            return {**DEFAULT_CONFIG, **config}
         except Exception as e:
             log_message(f"Failed to load config file: {e}", "WARNING")
             return DEFAULT_CONFIG
@@ -133,12 +119,12 @@ def article_id(url: str) -> str:
     """Generate unique ID for article based on URL"""
     return hashlib.md5(url.encode()).hexdigest()
 
-def fetch_feed(retries: int = MAX_RETRIES) -> list[dict]:
+def fetch_feed(feed_url: str, retries: int = MAX_RETRIES) -> list[dict]:
     """Fetch RSS feed with retry logic"""
     for attempt in range(retries):
         try:
             log_message(f"Fetching feed (attempt {attempt + 1}/{retries})…")
-            with urllib.request.urlopen(FEED_URL, timeout=15) as resp:
+            with urllib.request.urlopen(feed_url, timeout=15) as resp:
                 raw = resp.read()
             
             # Validate XML before parsing
@@ -194,31 +180,101 @@ def fetch_feed(retries: int = MAX_RETRIES) -> list[dict]:
             else:
                 raise
 
-def is_40k(article: dict, keywords: list) -> bool:
-    """Check if article matches Warhammer 40K keywords"""
+def matches_filter(article: dict, filter_config: dict) -> bool:
+    """Check if article passes filter rules"""
+    if not filter_config.get("enabled", True):
+        return True
+    
     haystack = (article["title"] + " " + article["description"]).lower()
-    return any(kw in haystack for kw in keywords)
+    
+    # Check exclude_patterns (regex)
+    exclude_patterns = filter_config.get("exclude_patterns", [])
+    for pattern in exclude_patterns:
+        try:
+            if re.search(pattern, haystack, re.IGNORECASE):
+                return False
+        except re.error as e:
+            log_message(f"Invalid regex pattern '{pattern}': {e}", "WARNING")
+    
+    # Check exclude_keywords
+    exclude_keywords = filter_config.get("exclude_keywords", [])
+    for kw in exclude_keywords:
+        if kw.lower() in haystack:
+            return False
+    
+    # Check include_only (if set, ONLY these patterns match)
+    include_only = filter_config.get("include_only", [])
+    if include_only:
+        for pattern in include_only:
+            try:
+                if re.search(pattern, haystack, re.IGNORECASE):
+                    return True
+            except re.error as e:
+                log_message(f"Invalid regex pattern '{pattern}': {e}", "WARNING")
+        return False
+    
+    # Check keywords (mode: "any" or "all")
+    keywords = filter_config.get("keywords", [])
+    if not keywords:
+        return True
+    
+    mode = filter_config.get("mode", "any")
+    
+    if mode == "all":
+        return all(kw.lower() in haystack for kw in keywords)
+    else:  # mode == "any"
+        return any(kw.lower() in haystack for kw in keywords)
 
-def post_to_discord(article: dict, retries: int = MAX_RETRIES):
+def parse_color(color_str: str) -> int:
+    """Parse hex color string to integer"""
+    try:
+        # Handle both "0xFF0000" and "#FF0000" formats
+        if isinstance(color_str, str):
+            color_str = color_str.strip()
+            if color_str.startswith("0x") or color_str.startswith("0X"):
+                return int(color_str, 16)
+            elif color_str.startswith("#"):
+                return int(color_str[1:], 16)
+            else:
+                return int(color_str, 16)
+        return int(color_str)
+    except (ValueError, TypeError):
+        log_message(f"Invalid color '{color_str}', using default", "WARNING")
+        return 0x1f77b4
+
+def post_to_discord(article: dict, config: dict, retries: int = MAX_RETRIES):
     """Post article to Discord with retry logic"""
     if not WEBHOOK_URL:
         log_message("Discord webhook URL not set. Skipping post.", "WARNING")
         return
     
+    embed_config = config.get("embed", DEFAULT_CONFIG["embed"])
+    
     embed = {
         "title":       article["title"][:256],
         "url":         article["link"],
-        "description": (article["description"] or "")[:300] + ("…" if len(article["description"]) > 300 else ""),
-        "color":       0xAB0000,   # dark red — very 40K
-        "footer":      {"text": "Warhammer Community • Warhammer 40,000"},
+        "description": (article["description"] or "")[:300] + ("…" if len(article.get("description", "")) > 300 else ""),
+        "color":       parse_color(embed_config.get("color", "0x1f77b4")),
         "timestamp":   utcnow().isoformat(),
     }
+    
+    # Add author if configured
+    if embed_config.get("author_name"):
+        embed["author"] = {"name": embed_config["author_name"]}
+        if embed_config.get("author_url"):
+            embed["author"]["url"] = embed_config["author_url"]
+    
+    # Add footer if configured
+    if embed_config.get("footer_text"):
+        embed["footer"] = {"text": embed_config["footer_text"]}
+    
+    # Add image if present
     if article.get("image_url"):
         embed["image"] = {"url": article["image_url"]}
 
     payload = json.dumps({
-        "username":   "WarCom Servo-Skull",
-        "avatar_url": "https://warcomfeed.link/favicon.ico",
+        "username":   embed_config.get("author_name", "RSS Feed Notifier"),
+        "avatar_url": embed_config.get("avatar_url"),
         "embeds":     [embed],
     }).encode()
 
@@ -227,7 +283,7 @@ def post_to_discord(article: dict, retries: int = MAX_RETRIES):
         data=payload,
         headers={
             "Content-Type": "application/json",
-            "User-Agent":   "WarComServoSkull/1.0 (GitHub Actions)",
+            "User-Agent":   "RSS-Discord-Notifier/1.0 (GitHub Actions)",
         },
         method="POST",
     )
@@ -268,27 +324,33 @@ def post_to_discord(article: dict, retries: int = MAX_RETRIES):
 def main():
     """Main function to fetch feed, filter articles, and post to Discord"""
     try:
-        log_message("=== Warhammer 40K Article Notifier Started ===")
+        log_message("=== RSS Discord Notifier Started ===")
         
         # Load configuration and tracking files
         config = load_config()
-        max_post = config.get("max_post", MAX_POST)
-        keywords = config.get("filter_keywords", DEFAULT_CONFIG["filter_keywords"])
+        feed_url = config.get("feed_url")
+        
+        if not feed_url:
+            log_message("Feed URL not configured in config.json", "ERROR")
+            sys.exit(1)
+        
+        max_post = config.get("max_post", 5)
+        filter_config = config.get("filter", DEFAULT_CONFIG["filter"])
         
         # Fetch and process articles
-        articles = fetch_feed()
+        articles = fetch_feed(feed_url)
         seen = load_seen()
         failed = load_failed()
         
-        # Filter: not seen before, not permanently failed, AND is 40K
+        # Filter: not seen before, not permanently failed, AND passes filter
         new = [
             a for a in articles 
             if article_id(a["link"]) not in seen 
             and article_id(a["link"]) not in failed
-            and is_40k(a, keywords)
+            and matches_filter(a, filter_config)
         ]
         
-        log_message(f"Found {len(new)} new 40K articles (out of {len(articles)} total)")
+        log_message(f"Found {len(new)} new articles (out of {len(articles)} total)")
         
         # Deduplicate within this run (in case feed has duplicates)
         seen_in_run = set()
@@ -304,7 +366,7 @@ def main():
         log_message(f"After deduplication: {len(deduplicated)} unique articles")
         
         if not deduplicated:
-            log_message("No new 40K articles to post.")
+            log_message("No new articles to post.")
             return
         
         # Post oldest-first, cap at max_post, with rate limiting
@@ -313,7 +375,7 @@ def main():
             aid = article_id(article["link"])
             try:
                 log_message(f"Posting: {article['title'][:80]}…")
-                post_to_discord(article)
+                post_to_discord(article, config)
                 seen[aid] = utcnow().isoformat()
                 posted_count += 1
                 
@@ -348,27 +410,31 @@ def main():
     except Exception as e:
         log_message(f"Fatal error: {e}", "ERROR")
         try:
-            post_error_to_discord(str(e))
+            post_error_to_discord(config, str(e))
         except:
             pass
         sys.exit(1)
 
-def post_error_to_discord(error_message: str):
+def post_error_to_discord(config: dict, error_message: str):
     """Send error notification to Discord"""
     if not WEBHOOK_URL:
         return
     
+    embed_config = config.get("embed", DEFAULT_CONFIG["embed"])
+    
     embed = {
-        "title": "❌ Warhammer 40K Notifier Error",
+        "title": "❌ RSS Notifier Error",
         "description": error_message[:500],
         "color": 0xFF0000,
-        "footer": {"text": "Warhammer Community • Warhammer 40,000"},
         "timestamp": utcnow().isoformat(),
     }
     
+    if embed_config.get("footer_text"):
+        embed["footer"] = {"text": embed_config["footer_text"]}
+    
     payload = json.dumps({
-        "username": "WarCom Servo-Skull",
-        "avatar_url": "https://warcomfeed.link/favicon.ico",
+        "username": embed_config.get("author_name", "RSS Feed Notifier"),
+        "avatar_url": embed_config.get("avatar_url"),
         "embeds": [embed],
     }).encode()
     
@@ -377,7 +443,7 @@ def post_error_to_discord(error_message: str):
         data=payload,
         headers={
             "Content-Type": "application/json",
-            "User-Agent": "WarComServoSkull/1.0 (GitHub Actions)",
+            "User-Agent": "RSS-Discord-Notifier/1.0 (GitHub Actions)",
         },
         method="POST",
     )
