@@ -14,22 +14,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 2. Restore the seen-articles cache so we don't re-post old articles
-      - name: Restore seen articles cache
-        uses: actions/cache@v4
-        with:
-          path: seen_articles.json
-          key: seen-articles-${{ runner.os }}
-          restore-keys: seen-articles-
-
-      # 3. Run the checker (no dependencies — pure stdlib Python)
+      # 2. Run the checker (no dependencies — pure stdlib Python)
       - name: Check feed and post to Discord
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python check_feed.py
 
-      # 4. Commit updated seen_articles.json back to the repo
-      #    so the cache is always fresh even after a cache miss
+      # 3. Commit updated seen_articles.json back to the repo
+      #    This ensures the file persists between runs
       - name: Commit updated seen articles
         run: |
           git config user.name  "github-actions[bot]"
