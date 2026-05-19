@@ -50,10 +50,20 @@ FILTER_KEYWORDS = [
 
 def load_seen() -> dict:
     """Load seen articles with timestamps. Returns {article_id: timestamp_iso}"""
-    if os.path.exists(SEEN_FILE):
-        with open(SEEN_FILE) as f:
-            return json.load(f)
-    return {}
+    if not os.path.exists(SEEN_FILE):
+        return {}
+    
+    with open(SEEN_FILE) as f:
+        data = json.load(f)
+    
+    # Handle backward compatibility: convert old list format to dict format
+    if isinstance(data, list):
+        # Old format was a list of article IDs with no timestamps
+        # Convert to dict with current time as timestamp
+        return {article_id: utcnow().isoformat() for article_id in data}
+    
+    # New format: dict with {article_id: timestamp_iso}
+    return data
 
 def save_seen(seen: dict):
     with open(SEEN_FILE, "w") as f:
