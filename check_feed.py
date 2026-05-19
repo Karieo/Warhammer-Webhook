@@ -4,7 +4,7 @@ import hashlib
 import xml.etree.ElementTree as ET
 import urllib.request
 import urllib.error
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 import time
 import sys
 
@@ -17,23 +17,21 @@ def log_message(message: str, level: str = "INFO"):
     print(f"[{timestamp}] [{level}] {message}")
     sys.stdout.flush()
 
-# ── Config ────────────────────────────────────────────────────────────[...]
-FEED_URL      = "https://warcomfeed.link/rss.xml"
-WEBHOOK_URL   = os.environ.get("DISCORD_WEBHOOK_URL", "")
-SEEN_FILE     = "seen_articles.json"
-FAILED_FILE   = "failed_articles.json"
-CONFIG_FILE   = "config.json"
-MAX_POST      = 5
-COOLDOWN_HOURS = 48
-MAX_RETRIES   = 3
-RETRY_DELAY   = 2  # seconds
+# ── Config ────────────────────────────────────────────────────────────
+FEED_URL           = "https://warcomfeed.link/rss.xml"
+WEBHOOK_URL        = os.environ.get("DISCORD_WEBHOOK_URL", "")
+SEEN_FILE          = "seen_articles.json"
+FAILED_FILE        = "failed_articles.json"
+CONFIG_FILE        = "config.json"
+MAX_POST           = 5
+MAX_RETRIES        = 3
+RETRY_DELAY        = 2  # seconds
 DISCORD_POST_DELAY = 0.5  # seconds between Discord posts to avoid rate limiting
-MAX_POST_FAILURES = 3  # Mark article as permanently failed after this many attempts
+MAX_POST_FAILURES  = 3  # Mark article as permanently failed after this many attempts
 
 # Default configuration
 DEFAULT_CONFIG = {
     "max_post": MAX_POST,
-    "cooldown_hours": COOLDOWN_HOURS,
     "filter_keywords": [
         "warhammer 40",
         "40,000",
@@ -94,7 +92,6 @@ def load_seen() -> dict:
             log_message("Converting old list format to dict format", "INFO")
             return {article_id: utcnow().isoformat() for article_id in data}
         
-        # New format: dict with {article_id: timestamp_iso}
         return data
     except Exception as e:
         log_message(f"Error loading seen articles: {e}", "ERROR")
@@ -133,20 +130,8 @@ def save_failed(failed: dict):
         log_message(f"Error saving failed articles: {e}", "ERROR")
 
 def article_id(url: str) -> str:
+    """Generate unique ID for article based on URL"""
     return hashlib.md5(url.encode()).hexdigest()
-
-def is_within_cooldown(article_id: str, seen: dict, cooldown_hours: int) -> bool:
-    """Check if article was posted within the last cooldown_hours"""
-    if article_id not in seen:
-        return False
-    
-    try:
-        posted_time = datetime.fromisoformat(seen[article_id])
-        time_since_post = utcnow() - posted_time
-        return time_since_post < timedelta(hours=cooldown_hours)
-    except (ValueError, TypeError):
-        # Invalid timestamp format, treat as old post
-        return False
 
 def fetch_feed(retries: int = MAX_RETRIES) -> list[dict]:
     """Fetch RSS feed with retry logic"""
@@ -173,21 +158,20 @@ def fetch_feed(retries: int = MAX_RETRIES) -> list[dict]:
                 title       = (item.findtext("title") or "").strip()
                 link        = (item.findtext("link")  or "").strip()
                 description = (item.findtext("description") or "").strip()
-                pub_date    = (item.findtext("pubDate") or "").strip()
-                # Grab enclosure image if present
-                enclosure = item.find("enclosure")
-                image_url = enclosure.get("url") if enclosure is not None else None
                 
                 # Skip articles with missing critical fields
                 if not link or not title:
                     log_message(f"Skipping article with missing link or title", "WARNING")
                     continue
                 
+                # Grab enclosure image if present
+                enclosure = item.find("enclosure")
+                image_url = enclosure.get("url") if enclosure is not None else None
+                
                 articles.append({
                     "title":       title,
                     "link":        link,
                     "description": description,
-                    "pub_date":    pub_date,
                     "image_url":   image_url,
                 })
             
@@ -211,11 +195,12 @@ def fetch_feed(retries: int = MAX_RETRIES) -> list[dict]:
                 raise
 
 def is_40k(article: dict, keywords: list) -> bool:
+    """Check if article matches Warhammer 40K keywords"""
     haystack = (article["title"] + " " + article["description"]).lower()
     return any(kw in haystack for kw in keywords)
 
 def post_to_discord(article: dict, retries: int = MAX_RETRIES):
-    """Post to Discord with retry logic"""
+    """Post article to Discord with retry logic"""
     if not WEBHOOK_URL:
         log_message("Discord webhook URL not set. Skipping post.", "WARNING")
         return
@@ -247,7 +232,6 @@ def post_to_discord(article: dict, retries: int = MAX_RETRIES):
         method="POST",
     )
     
-    last_error = None
     for attempt in range(retries):
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
@@ -256,7 +240,6 @@ def post_to_discord(article: dict, retries: int = MAX_RETRIES):
             log_message(f"Successfully posted to Discord: {article['title'][:50]}…")
             return
         except urllib.error.HTTPError as e:
-            last_error = e
             if e.code == 429:
                 # Rate limited — back off exponentially
                 backoff = RETRY_DELAY * (2 ** attempt)
@@ -267,38 +250,32 @@ def post_to_discord(article: dict, retries: int = MAX_RETRIES):
                 time.sleep(RETRY_DELAY)
             else:
                 log_message(f"Max retries reached. HTTP {e.code}", "ERROR")
+                raise
         except urllib.error.URLError as e:
-            last_error = e
             log_message(f"Network error posting to Discord: {e}", "ERROR")
             if attempt < retries - 1:
                 log_message(f"Retrying in {RETRY_DELAY} seconds…", "WARNING")
                 time.sleep(RETRY_DELAY)
             else:
-                log_message("Max retries reached. Skipping post.", "ERROR")
+                raise
         except Exception as e:
-            last_error = e
             log_message(f"Error posting to Discord: {e}", "ERROR")
             if attempt < retries - 1:
                 time.sleep(RETRY_DELAY)
             else:
-                log_message("Max retries reached after exception.", "ERROR")
-    
-    # All retries failed
-    if last_error:
-        raise last_error
-    raise RuntimeError("Failed to post to Discord: unknown error")
+                raise
 
 def main():
+    """Main function to fetch feed, filter articles, and post to Discord"""
     try:
         log_message("=== Warhammer 40K Article Notifier Started ===")
         
         # Load configuration and tracking files
         config = load_config()
-        cooldown_hours = config.get("cooldown_hours", COOLDOWN_HOURS)
         max_post = config.get("max_post", MAX_POST)
         keywords = config.get("filter_keywords", DEFAULT_CONFIG["filter_keywords"])
         
-        # Fetch and process
+        # Fetch and process articles
         articles = fetch_feed()
         seen = load_seen()
         failed = load_failed()
@@ -357,7 +334,7 @@ def main():
                         f"Article failed {failed[aid]} times. Marking as permanently failed: {article['title'][:50]}…",
                         "WARNING"
                     )
-                    seen[aid] = utcnow().isoformat()  # Mark as seen so we don't try again
+                    seen[aid] = utcnow().isoformat()
                 else:
                     log_message(
                         f"Attempt {failed[aid]}/{MAX_POST_FAILURES}. Will retry next run.",
@@ -370,7 +347,6 @@ def main():
     
     except Exception as e:
         log_message(f"Fatal error: {e}", "ERROR")
-        # Attempt to send error notification to Discord
         try:
             post_error_to_discord(str(e))
         except:
@@ -385,7 +361,7 @@ def post_error_to_discord(error_message: str):
     embed = {
         "title": "❌ Warhammer 40K Notifier Error",
         "description": error_message[:500],
-        "color": 0xFF0000,  # red
+        "color": 0xFF0000,
         "footer": {"text": "Warhammer Community • Warhammer 40,000"},
         "timestamp": utcnow().isoformat(),
     }
