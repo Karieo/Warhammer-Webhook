@@ -13,6 +13,8 @@ jobs:
       # 1. Check out your repo
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       # 2. Run the checker (no dependencies — pure stdlib Python)
       - name: Check feed and post to Discord
@@ -20,12 +22,16 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python check_feed.py
 
-      # 3. Commit updated seen_articles.json back to the repo
+      # 3. Commit and push updated seen_articles.json
       #    This ensures the file persists between runs
-      - name: Commit updated seen articles
+      - name: Commit and push updated seen articles
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add seen_articles.json || true
-          git diff --cached --quiet || git commit -m "chore: update seen articles [skip ci]"
-          git push || true
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "chore: update seen articles [skip ci]"
+            git push origin main || echo "Push failed, retrying with token..."
+          fi
