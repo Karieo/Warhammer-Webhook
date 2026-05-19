@@ -21,11 +21,14 @@ def log_message(message: str, level: str = "INFO"):
 FEED_URL      = "https://warcomfeed.link/rss.xml"
 WEBHOOK_URL   = os.environ.get("DISCORD_WEBHOOK_URL", "")
 SEEN_FILE     = "seen_articles.json"
+FAILED_FILE   = "failed_articles.json"
 CONFIG_FILE   = "config.json"
 MAX_POST      = 5
 COOLDOWN_HOURS = 48
 MAX_RETRIES   = 3
 RETRY_DELAY   = 2  # seconds
+DISCORD_POST_DELAY = 0.5  # seconds between Discord posts to avoid rate limiting
+MAX_POST_FAILURES = 3  # Mark article as permanently failed after this many attempts
 
 # Default configuration
 DEFAULT_CONFIG = {
@@ -97,6 +100,18 @@ def load_seen() -> dict:
         log_message(f"Error loading seen articles: {e}", "ERROR")
         return {}
 
+def load_failed() -> dict:
+    """Load failed articles with failure counts. Returns {article_id: failure_count}"""
+    if not os.path.exists(FAILED_FILE):
+        return {}
+    
+    try:
+        with open(FAILED_FILE) as f:
+            return json.load(f)
+    except Exception as e:
+        log_message(f"Error loading failed articles: {e}", "WARNING")
+        return {}
+
 def save_seen(seen: dict):
     """Save seen articles to file"""
     try:
@@ -106,6 +121,16 @@ def save_seen(seen: dict):
     except Exception as e:
         log_message(f"Error saving seen articles: {e}", "ERROR")
         raise
+
+def save_failed(failed: dict):
+    """Save failed articles to file"""
+    try:
+        with open(FAILED_FILE, "w") as f:
+            json.dump(failed, f, indent=2)
+        if failed:
+            log_message(f"Saved {len(failed)} failed articles to {FAILED_FILE}")
+    except Exception as e:
+        log_message(f"Error saving failed articles: {e}", "ERROR")
 
 def article_id(url: str) -> str:
     return hashlib.md5(url.encode()).hexdigest()
@@ -131,8 +156,18 @@ def fetch_feed(retries: int = MAX_RETRIES) -> list[dict]:
             with urllib.request.urlopen(FEED_URL, timeout=15) as resp:
                 raw = resp.read()
             
-            root = ET.fromstring(raw)
+            # Validate XML before parsing
+            try:
+                root = ET.fromstring(raw)
+            except ET.ParseError as e:
+                log_message(f"Invalid XML in feed: {e}", "ERROR")
+                raise
+            
             channel = root.find("channel")
+            if channel is None:
+                log_message("Feed missing <channel> element", "ERROR")
+                raise ValueError("Feed missing <channel> element")
+            
             articles = []
             for item in channel.findall("item"):
                 title       = (item.findtext("title") or "").strip()
@@ -142,6 +177,12 @@ def fetch_feed(retries: int = MAX_RETRIES) -> list[dict]:
                 # Grab enclosure image if present
                 enclosure = item.find("enclosure")
                 image_url = enclosure.get("url") if enclosure is not None else None
+                
+                # Skip articles with missing critical fields
+                if not link or not title:
+                    log_message(f"Skipping article with missing link or title", "WARNING")
+                    continue
+                
                 articles.append({
                     "title":       title,
                     "link":        link,
@@ -163,7 +204,11 @@ def fetch_feed(retries: int = MAX_RETRIES) -> list[dict]:
                 raise
         except Exception as e:
             log_message(f"Error parsing feed: {e}", "ERROR")
-            raise
+            if attempt < retries - 1:
+                log_message(f"Retrying in {RETRY_DELAY} seconds…", "WARNING")
+                time.sleep(RETRY_DELAY)
+            else:
+                raise
 
 def is_40k(article: dict, keywords: list) -> bool:
     haystack = (article["title"] + " " + article["description"]).lower()
@@ -202,6 +247,7 @@ def post_to_discord(article: dict, retries: int = MAX_RETRIES):
         method="POST",
     )
     
+    last_error = None
     for attempt in range(retries):
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
@@ -209,23 +255,44 @@ def post_to_discord(article: dict, retries: int = MAX_RETRIES):
                     raise RuntimeError(f"Discord returned HTTP {resp.status}")
             log_message(f"Successfully posted to Discord: {article['title'][:50]}…")
             return
+        except urllib.error.HTTPError as e:
+            last_error = e
+            if e.code == 429:
+                # Rate limited — back off exponentially
+                backoff = RETRY_DELAY * (2 ** attempt)
+                log_message(f"Rate limited by Discord. Backing off {backoff}s…", "WARNING")
+                time.sleep(backoff)
+            elif attempt < retries - 1:
+                log_message(f"HTTP error {e.code} posting to Discord: {e}", "WARNING")
+                time.sleep(RETRY_DELAY)
+            else:
+                log_message(f"Max retries reached. HTTP {e.code}", "ERROR")
         except urllib.error.URLError as e:
+            last_error = e
             log_message(f"Network error posting to Discord: {e}", "ERROR")
             if attempt < retries - 1:
                 log_message(f"Retrying in {RETRY_DELAY} seconds…", "WARNING")
                 time.sleep(RETRY_DELAY)
             else:
                 log_message("Max retries reached. Skipping post.", "ERROR")
-                raise
         except Exception as e:
+            last_error = e
             log_message(f"Error posting to Discord: {e}", "ERROR")
-            raise
+            if attempt < retries - 1:
+                time.sleep(RETRY_DELAY)
+            else:
+                log_message("Max retries reached after exception.", "ERROR")
+    
+    # All retries failed
+    if last_error:
+        raise last_error
+    raise RuntimeError("Failed to post to Discord: unknown error")
 
 def main():
     try:
         log_message("=== Warhammer 40K Article Notifier Started ===")
         
-        # Load configuration
+        # Load configuration and tracking files
         config = load_config()
         cooldown_hours = config.get("cooldown_hours", COOLDOWN_HOURS)
         max_post = config.get("max_post", MAX_POST)
@@ -234,12 +301,14 @@ def main():
         # Fetch and process
         articles = fetch_feed()
         seen = load_seen()
+        failed = load_failed()
         
-        # Filter: not seen before AND is 40K
-        # This deduplicates by checking if article_id exists in seen at all
+        # Filter: not seen before, not permanently failed, AND is 40K
         new = [
             a for a in articles 
-            if article_id(a["link"]) not in seen and is_40k(a, keywords)
+            if article_id(a["link"]) not in seen 
+            and article_id(a["link"]) not in failed
+            and is_40k(a, keywords)
         ]
         
         log_message(f"Found {len(new)} new 40K articles (out of {len(articles)} total)")
@@ -261,19 +330,42 @@ def main():
             log_message("No new 40K articles to post.")
             return
         
-        # Post oldest-first, cap at max_post
+        # Post oldest-first, cap at max_post, with rate limiting
         posted_count = 0
-        for article in reversed(deduplicated[:max_post]):
+        for i, article in enumerate(reversed(deduplicated[:max_post])):
+            aid = article_id(article["link"])
             try:
                 log_message(f"Posting: {article['title'][:80]}…")
                 post_to_discord(article)
-                seen[article_id(article["link"])] = utcnow().isoformat()
+                seen[aid] = utcnow().isoformat()
                 posted_count += 1
+                
+                # Rate limiting: add delay between posts (except after the last one)
+                if i < max_post - 1:
+                    time.sleep(DISCORD_POST_DELAY)
+            
             except Exception as e:
                 log_message(f"Failed to post article: {e}", "ERROR")
-                # Continue to next article instead of failing completely
+                
+                # Track failure count
+                if aid not in failed:
+                    failed[aid] = 0
+                failed[aid] += 1
+                
+                if failed[aid] >= MAX_POST_FAILURES:
+                    log_message(
+                        f"Article failed {failed[aid]} times. Marking as permanently failed: {article['title'][:50]}…",
+                        "WARNING"
+                    )
+                    seen[aid] = utcnow().isoformat()  # Mark as seen so we don't try again
+                else:
+                    log_message(
+                        f"Attempt {failed[aid]}/{MAX_POST_FAILURES}. Will retry next run.",
+                        "INFO"
+                    )
         
         save_seen(seen)
+        save_failed(failed)
         log_message(f"=== Completed: Posted {posted_count} article(s) ===")
     
     except Exception as e:
