@@ -4,16 +4,17 @@ import hashlib
 import xml.etree.ElementTree as ET
 import urllib.request
 import urllib.error
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
-# ── Config ────────────────────────────────────────────────────────────────────
+# ── Config ────────────────────────────────────────────────────────────[...]
 FEED_URL      = "https://warcomfeed.link/rss.xml"
 WEBHOOK_URL   = os.environ["DISCORD_WEBHOOK_URL"]   # set in GitHub Actions secrets
 SEEN_FILE     = "seen_articles.json"                 # persisted via GitHub Actions cache
 MAX_POST      = 5                                    # max new articles to post per run
+COOLDOWN_HOURS = 48                                  # don't repost same link within 48 hours
 
 # ── Warhammer 40,000 filter ───────────────────────────────────────────────────
 # The WarCom feed covers ALL Warhammer topics.
@@ -47,18 +48,32 @@ FILTER_KEYWORDS = [
     "kill team",
 ]
 
-def load_seen() -> set:
+def load_seen() -> dict:
+    """Load seen articles with timestamps. Returns {article_id: timestamp_iso}"""
     if os.path.exists(SEEN_FILE):
         with open(SEEN_FILE) as f:
-            return set(json.load(f))
-    return set()
+            return json.load(f)
+    return {}
 
-def save_seen(seen: set):
+def save_seen(seen: dict):
     with open(SEEN_FILE, "w") as f:
-        json.dump(list(seen), f, indent=2)
+        json.dump(seen, f, indent=2)
 
 def article_id(url: str) -> str:
     return hashlib.md5(url.encode()).hexdigest()
+
+def is_within_cooldown(article_id: str, seen: dict) -> bool:
+    """Check if article was posted within the last COOLDOWN_HOURS"""
+    if article_id not in seen:
+        return False
+    
+    try:
+        posted_time = datetime.fromisoformat(seen[article_id])
+        time_since_post = utcnow() - posted_time
+        return time_since_post < timedelta(hours=COOLDOWN_HOURS)
+    except (ValueError, TypeError):
+        # Invalid timestamp format, treat as old post
+        return False
 
 def fetch_feed() -> list[dict]:
     with urllib.request.urlopen(FEED_URL, timeout=15) as resp:
@@ -122,7 +137,12 @@ def main():
     print(f"[{utcnow().isoformat()}] Fetching feed…")
     articles = fetch_feed()
     seen     = load_seen()
-    new      = [a for a in articles if article_id(a["link"]) not in seen and is_40k(a)]
+    
+    # Filter: not in cooldown, not already posted forever, and is 40K
+    new      = [
+        a for a in articles 
+        if not is_within_cooldown(article_id(a["link"]), seen) and is_40k(a)
+    ]
 
     if not new:
         print("No new 40K articles.")
@@ -132,7 +152,7 @@ def main():
     for article in reversed(new[:MAX_POST]):
         print(f"  Posting: {article['title']}")
         post_to_discord(article)
-        seen.add(article_id(article["link"]))
+        seen[article_id(article["link"])] = utcnow().isoformat()
 
     save_seen(seen)
     print(f"Done. Posted {min(len(new), MAX_POST)} article(s).")
