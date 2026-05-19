@@ -1,15 +1,15 @@
-# Warhammer 40K Discord Notifier
+# Generic RSS Discord Webhook Notifier
 
-Posts new Warhammer 40,000 articles from [Warhammer Community](https://www.warhammer-community.com/en-gb/topics/warhammer-40000/) to a Discord channel — automatically, every hour, for free via GitHub Actions.
+Posts articles from any RSS feed to a Discord channel — automatically and for free via GitHub Actions.
 
 ---
 
 ## How it works
 
-1. GitHub Actions runs `check_feed.py` once per hour
-2. The script fetches the [WarCom Feed RSS](https://warcomfeed.link/) (an unofficial feed that updates hourly)
-3. It filters articles for Warhammer 40K keywords (configured in `config.json`)
-4. Any new articles get posted to your Discord channel as a rich embed
+1. GitHub Actions runs `check_feed.py` on a configurable schedule (default: hourly)
+2. The script fetches your RSS feed
+3. It filters articles based on your configuration
+4. New articles get posted to your Discord channel as rich embeds
 5. `seen_articles.json` tracks what's been posted so nothing is duplicated
 
 ---
@@ -20,7 +20,7 @@ Posts new Warhammer 40,000 articles from [Warhammer Community](https://www.warha
 
 1. Open your Discord server → right-click the channel → **Edit Channel**
 2. Go to **Integrations** → **Webhooks** → **New Webhook**
-3. Give it a name (e.g. `WarCom Servo-Skull`), copy the **Webhook URL**
+3. Give it a name, copy the **Webhook URL**
 
 ### 2. Create a GitHub Repository
 
@@ -31,7 +31,7 @@ Posts new Warhammer 40,000 articles from [Warhammer Community](https://www.warha
    config.json
    .github/
      workflows/
-       warhammer-notifier.yml
+       rss-notifier.yml
    ```
 
 ### 3. Add the Webhook URL as a Secret
@@ -42,66 +42,160 @@ Posts new Warhammer 40,000 articles from [Warhammer Community](https://www.warha
 4. Value: paste your Discord webhook URL
 5. Click **Add secret**
 
-### 4. Enable Actions & Test
+### 4. Configure Your Feed
 
-1. Go to the **Actions** tab in your repo
-2. Click **Warhammer 40K Article Notifier** → **Run workflow** to test it immediately
-3. Check your Discord channel — you should see recent 40K articles appear!
-
-After that it runs automatically every hour. 🎉
-
----
-
-## Customisation
-
-### Master Configuration File (`config.json`)
-
-The `config.json` file is the central configuration hub for all settings:
+Edit `config.json` to specify your RSS feed and customize the output:
 
 ```json
 {
+  "feed_url": "https://example.com/feed.xml",
   "max_post": 5,
-  "filter_keywords": [
-    "warhammer 40",
-    "40k",
-    "space marine",
-    ...
-  ]
+  "embed": {
+    "author_name": "My Feed",
+    "avatar_url": "https://example.com/icon.png",
+    "color": "0xFF5733",
+    "footer_text": "Powered by RSS"
+  },
+  "filter": {
+    "enabled": true,
+    "mode": "any",
+    "keywords": ["python", "javascript"],
+    "exclude_keywords": ["spam"],
+    "exclude_patterns": ["crypto|nft"]
+  }
 }
 ```
 
-**Settings:**
-- **`max_post`** (integer): Maximum number of articles to post per run (default: `5`)
-- **`filter_keywords`** (array): List of keywords to match against article titles and descriptions. Articles must contain at least one keyword to be posted. Leave empty and modify the `is_40k()` function in `check_feed.py` to post all articles.
+### 5. Enable Actions & Test
 
-Simply edit `config.json` in your repository to customize behavior without touching the Python code.
+1. Go to the **Actions** tab in your repo
+2. Click **RSS Discord Notifier** → **Run workflow** to test it immediately
+3. Check your Discord channel — you should see articles appear!
 
-### Change the check frequency
+After that it runs automatically on your configured schedule. 🎉
 
-Edit the `cron` line in `.github/workflows/warhammer-notifier.yml`:
+---
+
+## Configuration Reference
+
+### Core Settings
+
+- **`feed_url`** (string): URL of your RSS feed
+- **`max_post`** (integer): Maximum articles to post per run (default: `5`)
+- **`check_interval_minutes`** (integer): How often to check (informational; edit the cron in the workflow file to change)
+
+### Embed Customization
+
+Under `embed`:
+- **`author_name`** (string): Name shown in the embed header
+- **`author_url`** (string or null): Optional URL for the author name
+- **`avatar_url`** (string or null): Optional avatar/icon URL
+- **`color`** (string): Hex color code (`"0xFF0000"`, `"#FF0000"`, or `"16711680"`)
+- **`footer_text`** (string): Text shown in the embed footer
+
+### Advanced Filtering
+
+Under `filter`:
+
+- **`enabled`** (boolean): Set to `false` to post all articles without filtering
+- **`mode`** (string): How to match keywords
+  - `"any"`: Post if article contains ANY keyword (OR logic)
+  - `"all"`: Post only if article contains ALL keywords (AND logic)
+  
+- **`keywords`** (array): Strings to search for in title + description
+  ```json
+  "keywords": ["python", "javascript", "typescript"]
+  ```
+
+- **`exclude_keywords`** (array): Articles containing these are skipped (blacklist)
+  ```json
+  "exclude_keywords": ["spam", "crypto"]
+  ```
+
+- **`include_only`** (array): Regex patterns — ONLY articles matching these are posted (overrides keywords)
+  ```json
+  "include_only": ["^Breaking:", "\\[URGENT\\]"]
+  ```
+
+- **`exclude_patterns`** (array): Regex patterns — articles matching these are skipped
+  ```json
+  "exclude_patterns": ["cryptocurrency|NFT|blockchain"]
+  ```
+
+---
+
+## Examples
+
+### Post articles about Python OR JavaScript, but never crypto
+
+```json
+{
+  "feed_url": "https://news.ycombinator.com/rss",
+  "filter": {
+    "enabled": true,
+    "mode": "any",
+    "keywords": ["python", "javascript"],
+    "exclude_keywords": ["crypto", "bitcoin"]
+  }
+}
+```
+
+### Post only breaking news
+
+```json
+{
+  "feed_url": "https://feeds.reuters.com/reuters/newsOne",
+  "filter": {
+    "enabled": true,
+    "include_only": ["BREAKING:", "\\[URGENT\\]"]
+  }
+}
+```
+
+### Post everything (no filtering)
+
+```json
+{
+  "filter": {
+    "enabled": false
+  }
+}
+```
+
+### Post with custom branding
+
+```json
+{
+  "embed": {
+    "author_name": "Tech News Daily",
+    "avatar_url": "https://example.com/logo.png",
+    "color": "0x2196F3",
+    "footer_text": "Subscribe to Tech News Daily"
+  }
+}
+```
+
+---
+
+## Changing the Check Frequency
+
+Edit the `cron` line in `.github/workflows/rss-notifier.yml`:
+
 ```yaml
 - cron: "0 * * * *"    # every hour (default)
 - cron: "*/30 * * * *" # every 30 minutes
 - cron: "0 9 * * *"    # once a day at 9am UTC
+- cron: "0 9,21 * * *" # twice a day (9am & 9pm UTC)
 ```
 
-### Change the 40K keyword filter
-
-Edit the `filter_keywords` array in `config.json` to add/remove terms.
-
-To post **all** Warhammer articles regardless of topic:
-1. Set `"filter_keywords": []` in `config.json`
-2. Edit `check_feed.py` and modify the `is_40k()` function to always return `True`
-
-### Change the embed colour
-
-Edit the `"color"` hex value in `post_to_discord()` inside `check_feed.py` (line ~212).
+[Cron syntax reference](https://crontab.guru/)
 
 ---
 
 ## Notes
 
 - Uses only Python standard library — no `pip install` needed
-- The WarCom Feed is unofficial but well-maintained; all content belongs to Warhammer Community / Games Workshop
-- GitHub Actions free tier gives 2,000 minutes/month — this workflow uses ~1 min/run × 24 runs/day = ~720 min/month, well within the limit
-- Configuration is loaded from `config.json` on each run; no restart needed for changes to take effect
+- GitHub Actions free tier gives 2,000 minutes/month; this script uses ~1 min/run, so daily checks are well within limits
+- Configuration is loaded from `config.json` on each run; no restart needed
+- `seen_articles.json` and `failed_articles.json` persist across runs via git commits
+- Failed articles are automatically retried on subsequent runs (up to 3 attempts before being marked permanent)
