@@ -4,6 +4,8 @@ on:
   schedule:
     - cron: "0 * * * *"   # every hour on the hour (UTC)
   workflow_dispatch:        # lets you trigger it manually from GitHub's UI
+  repository_dispatch:      # allows external webhooks/services to trigger the workflow
+    types: [check-feed]
 
 jobs:
   check-and-notify:
