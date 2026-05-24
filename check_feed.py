@@ -50,6 +50,16 @@ DEFAULT_CONFIG = {
     }
 }
 
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Recursively merge override into base, returning a new dict."""
+    result = dict(base)
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
 def load_config() -> dict:
     """Load configuration from config.json or use defaults"""
     if os.path.exists(CONFIG_FILE):
@@ -57,8 +67,8 @@ def load_config() -> dict:
             with open(CONFIG_FILE) as f:
                 config = json.load(f)
             log_message(f"Loaded configuration from {CONFIG_FILE}")
-            # Merge with defaults to ensure all required keys exist
-            return {**DEFAULT_CONFIG, **config}
+            # Deep-merge so nested keys like filter.* and embed.* keep their defaults
+            return _deep_merge(DEFAULT_CONFIG, config)
         except Exception as e:
             log_message(f"Failed to load config file: {e}", "WARNING")
             return DEFAULT_CONFIG
@@ -371,7 +381,8 @@ def main():
         
         # Post oldest-first, cap at max_post, with rate limiting
         posted_count = 0
-        for i, article in enumerate(reversed(deduplicated[:max_post])):
+        to_post = list(reversed(deduplicated[:max_post]))
+        for i, article in enumerate(to_post):
             aid = article_id(article["link"])
             try:
                 log_message(f"Posting: {article['title'][:80]}…")
@@ -380,7 +391,7 @@ def main():
                 posted_count += 1
                 
                 # Rate limiting: add delay between posts (except after the last one)
-                if i < max_post - 1:
+                if i < len(to_post) - 1:
                     time.sleep(DISCORD_POST_DELAY)
             
             except Exception as e:

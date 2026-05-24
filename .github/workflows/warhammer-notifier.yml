@@ -30,7 +30,7 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add seen_articles.json || true
+          git add seen_articles.json failed_articles.json || true
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
