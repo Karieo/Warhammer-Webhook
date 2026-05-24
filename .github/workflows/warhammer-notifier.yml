@@ -7,6 +7,10 @@ on:
   repository_dispatch:      # allows external webhooks/services to trigger the workflow
     types: [check-feed]
 
+concurrency:
+  group: check-feed
+  cancel-in-progress: false
+
 jobs:
   check-and-notify:
     runs-on: ubuntu-latest
@@ -35,5 +39,10 @@ jobs:
             echo "No changes to commit"
           else
             git commit -m "chore: update seen articles [skip ci]"
-            git push origin main || echo "Push failed, retrying with token..."
+            git push origin main || (
+              echo "Push failed, retrying after rebase..." &&
+              git fetch origin main &&
+              git rebase origin/main &&
+              git push origin main
+            )
           fi
