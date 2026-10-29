@@ -199,3 +199,36 @@ Edit the `cron` line in `.github/workflows/rss-notifier.yml`:
 - Configuration is loaded from `config.json` on each run; no restart needed
 - `seen_articles.json` and `failed_articles.json` persist across runs via git commits
 - Failed articles are automatically retried on subsequent runs (up to 3 attempts before being marked permanent)
+
+
+## Offline regression tests and delivery state
+
+Run `python -m unittest discover -s tests -v` before publishing changes. The suite
+uses synthetic articles and mocked HTTP/state helpers; it sends no Discord
+messages and does not edit the committed tracking files. The scheduled workflow
+also runs this gate before checking the feed.
+
+- A missing/blank `DISCORD_WEBHOOK_URL` fails before feed or delivery-state processing.
+- An article enters `seen_articles.json` only after a successful webhook response.
+- Exhausted HTTP 429/network/server-error retries count as a failed delivery,
+  not a successful post. Each article remains eligible on later runs until
+  `MAX_POST_FAILURES` (currently three failed runs). Each run can attempt the
+  HTTP request up to `MAX_RETRIES` times (currently three).
+- Successful retries clear the failure counter. Terminal failures remain in
+  `failed_articles.json` at the limit rather than being labeled delivered.
+- Assuming the source feed is newest-first, the oldest eligible entries are
+  processed first, up to `max_post`. The configured keyword/filter rules and
+  existing seen history still apply.
+
+Historical seen entries are not automatically replayed: some may have been
+marked seen by the earlier failure-handling bug, but code alone cannot determine
+which were actually delivered. Any recovery of historical notifications should
+be reviewed separately to avoid duplicate messages. Likewise, manually retrying
+a terminal failure requires deliberate removal/reset of its failure record.
+
+Delivery is not exactly-once: a Discord success followed by a local/state-push
+failure can cause a later duplicate, and a request whose response is lost may
+have reached Discord. Per-article delivery failures remain logged and persisted
+without aborting the batch. The final log reports posted/failed counts, and GitHub
+Actions receives a warning annotation when any article fails. This preserves the
+state-commit step; workflow success alone is still not a delivery receipt.

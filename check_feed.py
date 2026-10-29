@@ -254,9 +254,8 @@ def parse_color(color_str: str) -> int:
 
 def post_to_discord(article: dict, config: dict, retries: int = MAX_RETRIES):
     """Post article to Discord with retry logic"""
-    if not WEBHOOK_URL:
-        log_message("Discord webhook URL not set. Skipping post.", "WARNING")
-        return
+    if not WEBHOOK_URL.strip():
+        raise ValueError("DISCORD_WEBHOOK_URL is not configured")
     
     embed_config = config.get("embed", DEFAULT_CONFIG["embed"])
     
@@ -307,6 +306,8 @@ def post_to_discord(article: dict, config: dict, retries: int = MAX_RETRIES):
             return
         except urllib.error.HTTPError as e:
             if e.code == 429:
+                if attempt == retries - 1:
+                    raise
                 # Rate limited — back off exponentially
                 backoff = RETRY_DELAY * (2 ** attempt)
                 log_message(f"Rate limited by Discord. Backing off {backoff}s…", "WARNING")
@@ -333,6 +334,11 @@ def post_to_discord(article: dict, config: dict, retries: int = MAX_RETRIES):
 
 def main():
     """Main function to fetch feed, filter articles, and post to Discord"""
+    # Fail before fetching, state processing, or attempting an error webhook.
+    if not WEBHOOK_URL.strip():
+        log_message("DISCORD_WEBHOOK_URL is not configured", "ERROR")
+        sys.exit(1)
+    config = {}
     try:
         log_message("=== RSS Discord Notifier Started ===")
         
@@ -356,7 +362,7 @@ def main():
         new = [
             a for a in articles 
             if article_id(a["link"]) not in seen 
-            and article_id(a["link"]) not in failed
+            and failed.get(article_id(a["link"]), 0) < MAX_POST_FAILURES
             and matches_filter(a, filter_config)
         ]
         
@@ -381,13 +387,15 @@ def main():
         
         # Post oldest-first, cap at max_post, with rate limiting
         posted_count = 0
-        to_post = list(reversed(deduplicated[:max_post]))
+        failed_count = 0
+        to_post = list(reversed(deduplicated))[:max_post]
         for i, article in enumerate(to_post):
             aid = article_id(article["link"])
             try:
                 log_message(f"Posting: {article['title'][:80]}…")
                 post_to_discord(article, config)
                 seen[aid] = utcnow().isoformat()
+                failed.pop(aid, None)
                 posted_count += 1
                 
                 # Rate limiting: add delay between posts (except after the last one)
@@ -395,6 +403,7 @@ def main():
                     time.sleep(DISCORD_POST_DELAY)
             
             except Exception as e:
+                failed_count += 1
                 log_message(f"Failed to post article: {e}", "ERROR")
                 
                 # Track failure count
@@ -407,7 +416,8 @@ def main():
                         f"Article failed {failed[aid]} times. Marking as permanently failed: {article['title'][:50]}…",
                         "WARNING"
                     )
-                    seen[aid] = utcnow().isoformat()
+                    # Keep terminal failures separate from confirmed deliveries.
+                    # The failure count excludes them from subsequent runs.
                 else:
                     log_message(
                         f"Attempt {failed[aid]}/{MAX_POST_FAILURES}. Will retry next run.",
@@ -416,7 +426,14 @@ def main():
         
         save_seen(seen)
         save_failed(failed)
-        log_message(f"=== Completed: Posted {posted_count} article(s) ===")
+        log_message(
+            f"=== Completed: Posted {posted_count}; failed {failed_count} article(s) ===",
+            "WARNING" if failed_count else "INFO",
+        )
+        if failed_count and os.environ.get("GITHUB_ACTIONS") == "true":
+            # Keep the persistence step running, but surface delivery failure
+            # in the Actions UI instead of relying on a green job alone.
+            print(f"::warning::Discord delivery failed for {failed_count} article(s); review persisted failure counts.")
     
     except Exception as e:
         log_message(f"Fatal error: {e}", "ERROR")
@@ -468,3 +485,4 @@ def post_error_to_discord(config: dict, error_message: str):
 
 if __name__ == "__main__":
     main()
+
