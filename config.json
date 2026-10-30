@@ -1,6 +1,5 @@
 {
-  "feed_url": "https://warcomfeed.link/rss.xml",
-  "max_post": 5,
+  "max_post": 2,
   "embed": {
     "author_name": "Warhammer 40K",
     "author_url": null,
@@ -45,5 +44,14 @@
     "exclude_keywords": [],
     "include_only": [],
     "exclude_patterns": []
-  }
+  },
+  "source": "official",
+  "official_urls": [
+    "https://www.warhammer-community.com/en-gb/",
+    "https://www.warhammer-community.com/en-gb/setting/warhammer-40000/",
+    "https://www.warhammer-community.com/en-gb/setting/kill-team/"
+  ],
+  "source_max_age_days": 7,
+  "max_article_age_days": 3,
+  "not_before": "2026-10-28"
 }

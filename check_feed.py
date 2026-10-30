@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import time
 import sys
 import re
+from official_source import SourceError, canonical_article_url, fetch_official, recent_articles
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -67,12 +68,13 @@ def load_config() -> dict:
             with open(CONFIG_FILE) as f:
                 config = json.load(f)
             log_message(f"Loaded configuration from {CONFIG_FILE}")
+            if not isinstance(config, dict) or config.get("source") not in ("official", "rss"):
+                raise ValueError("Configuration requires explicit official or rss source")
             # Deep-merge so nested keys like filter.* and embed.* keep their defaults
             return _deep_merge(DEFAULT_CONFIG, config)
         except Exception as e:
-            log_message(f"Failed to load config file: {e}", "WARNING")
-            return DEFAULT_CONFIG
-    return DEFAULT_CONFIG
+            raise SourceError("Could not load config.json; refusing silent source fallback") from e
+    raise SourceError("config.json is missing; refusing silent source fallback")
 
 def load_seen() -> dict:
     """Load seen articles with timestamps. Returns {article_id: timestamp_iso}"""
@@ -127,7 +129,7 @@ def save_failed(failed: dict):
 
 def article_id(url: str) -> str:
     """Generate unique ID for article based on URL"""
-    return hashlib.md5(url.encode()).hexdigest()
+    return hashlib.md5(canonical_article_url(url).encode()).hexdigest()
 
 def fetch_feed(feed_url: str, retries: int = MAX_RETRIES) -> list[dict]:
     """Fetch RSS feed with retry logic"""
@@ -332,10 +334,10 @@ def post_to_discord(article: dict, config: dict, retries: int = MAX_RETRIES):
             else:
                 raise
 
-def main():
+def main(dry_run=False):
     """Main function to fetch feed, filter articles, and post to Discord"""
     # Fail before fetching, state processing, or attempting an error webhook.
-    if not WEBHOOK_URL.strip():
+    if not dry_run and not WEBHOOK_URL.strip():
         log_message("DISCORD_WEBHOOK_URL is not configured", "ERROR")
         sys.exit(1)
     config = {}
@@ -346,7 +348,7 @@ def main():
         config = load_config()
         feed_url = config.get("feed_url")
         
-        if not feed_url:
+        if config.get("source", "rss") != "official" and not feed_url:
             log_message("Feed URL not configured in config.json", "ERROR")
             sys.exit(1)
         
@@ -354,7 +356,8 @@ def main():
         filter_config = config.get("filter", DEFAULT_CONFIG["filter"])
         
         # Fetch and process articles
-        articles = fetch_feed(feed_url)
+        articles = (recent_articles(fetch_official(config, utcnow()), config, utcnow())
+                    if config.get("source") == "official" else fetch_feed(feed_url))
         seen = load_seen()
         failed = load_failed()
         
@@ -389,6 +392,11 @@ def main():
         posted_count = 0
         failed_count = 0
         to_post = list(reversed(deduplicated))[:max_post]
+        if dry_run:
+            for article in to_post:
+                log_message("DRY RUN: " + article["title"] + " | " + article["link"])
+            log_message(f"DRY RUN: {len(to_post)} candidate(s); no posts or state writes")
+            return
         for i, article in enumerate(to_post):
             aid = article_id(article["link"])
             try:
@@ -437,6 +445,10 @@ def main():
     
     except Exception as e:
         log_message(f"Fatal error: {e}", "ERROR")
+        if isinstance(e, SourceError) or dry_run:
+            if os.environ.get("GITHUB_ACTIONS") == "true":
+                print("::error::Official news source failed freshness/parsing checks; no articles posted.")
+            sys.exit(1)
         try:
             post_error_to_discord(config, str(e))
         except:
@@ -484,5 +496,8 @@ def post_error_to_discord(config: dict, error_message: str):
         log_message(f"Failed to send error notification: {e}", "ERROR")
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dry-run", action="store_true", help="Read sources and list candidates without Discord or state writes")
+    main(dry_run=parser.parse_args().dry_run)
 

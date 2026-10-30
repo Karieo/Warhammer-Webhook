@@ -60,6 +60,7 @@ class DeliveryTests(unittest.TestCase):
 
 class StateTests(unittest.TestCase):
     def setUp(self):
+        patch.dict(feed.os.environ, {"GITHUB_ACTIONS": "false"}).start()
         # Block real HTTP even if a future refactor bypasses our posting mock.
         patch.object(feed.urllib.request, "urlopen", side_effect=AssertionError("No network allowed")).start()
         patch.object(feed, "WEBHOOK_URL", "https://example.invalid/webhook").start()
