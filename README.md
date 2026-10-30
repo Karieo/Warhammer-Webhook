@@ -232,3 +232,55 @@ have reached Discord. Per-article delivery failures remain logged and persisted
 without aborting the batch. The final log reports posted/failed counts, and GitHub
 Actions receives a warning annotation when any article fails. This preserves the
 state-commit step; workflow success alone is still not a delivery receipt.
+
+## Official-source recovery (prepared October 30, 2026)
+
+The unofficial `warcomfeed.link` RSS stopped advancing on September 11. The
+configured source now reads public article metadata embedded in the official
+Warhammer Community homepage, Warhammer 40,000 page, and Kill Team page. No
+JavaScript is executed. The existing keyword filter still applies; this is not
+an exhaustive crawl of every historical article or an official RSS service.
+
+- `official_source.py` validates English article URLs, titles and publication
+  dates. Empty, invalid, unavailable, unexpectedly redirected or stale sources
+  fail the run visibly instead of silently returning “nothing new”.
+- `source_max_age_days: 7` checks the newest article across the three pages.
+  Each individual page also warns when its latest article is older than seven
+  days, even if another page is fresh; a quiet category does not abort the batch.
+  Missing, invalid or unrecognized source configuration also fails closed. A stale/parse failure does **not** send repeated error
+  posts into Discord; GitHub Actions displays a failed run/error annotation.
+- `max_article_age_days: 3`, `not_before: "2026-10-28"`, and `max_post: 2`
+  deliberately limit catch-up. Older items are skipped, **not** marked delivered.
+  After a long outage, older missed articles are not automatically replayed.
+  Retry candidates also age out after three days; failed counts remain intact
+  for deliberate review rather than automatically requeueing old news.
+- Identity normalizes official `/en-gb/articles/.../` URLs to the original
+  nonlocalized, no-trailing-slash form before hashing, preserving existing seen
+  IDs. No committed history reset or migration is required.
+- A network/source failure leaves delivery tracking untouched. Existing bounded
+  Discord retries and confirmed-success-only seen tracking remain in effect.
+- Images are omitted from these new-source embeds rather than guessing asset URLs.
+
+### Verify without posting
+
+```sh
+python -m unittest discover -s tests -v
+python check_feed.py --dry-run
+```
+
+Dry-run needs no Discord secret and performs only public source reads, local
+tracking reads and candidate logging. It never calls Discord or writes tracking
+files. Fixtures are saved official-page article-data scripts fetched October 30,
+2026; they exercise the actual transport/metadata format. The adapter will fail
+closed if the upstream format changes.
+
+### Release boundary
+
+This patch is prepared for review only. Publishing a draft PR and merging it are
+separate authorization steps. Merging changes `config.json` and therefore makes
+the **next existing scheduled run** use the new source and post up to two eligible
+articles. No manual workflow dispatch, test Discord message, secret change or
+history reset is needed. Before approval, review the dry-run candidates and
+confirm the bounded catch-up policy. After an approved release, inspect the
+natural run’s real posting count and ask Clay to confirm arrival in the intended
+channel; a passing test or dry run does not prove webhook validity/destination.
